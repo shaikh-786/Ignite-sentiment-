@@ -1,0 +1,105 @@
+!pip install datasets transformers
+
+from datasets import load_dataset
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.feature_extraction.text import CountVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.svm import SVC
+from sklearn.metrics import accuracy_score, classification_report
+import numpy as np
+import gensim.downloader as api
+from transformers import BertTokenizer, BertForSequenceClassification, Trainer, TrainingArguments
+from datasets import Dataset
+
+# Load the IMDb dataset from Hugging Face
+dataset = load_dataset('imdb')
+
+# Split the dataset into training and testing sets
+train_dataset = dataset['train'].to_pandas()
+test_dataset = dataset['test'].to_pandas()
+
+# Preprocess the data
+label_encoder = LabelEncoder()
+train_dataset['label'] = label_encoder.fit_transform(train_dataset['label'])
+test_dataset['label'] = label_encoder.transform(test_dataset['label'])
+
+def preprocess_text(text):
+    text = text.lower()
+    text = ''.join([char for char in text if char.isalnum() or char.isspace()])
+    return text
+
+train_dataset['text'] = train_dataset['text'].apply(preprocess_text)
+test_dataset['text'] = test_dataset['text'].apply(preprocess_text)
+
+# Bag of Words Model
+vectorizer = CountVectorizer(max_features=5000)
+X_train_bow = vectorizer.fit_transform(train_dataset['text'])
+X_test_bow = vectorizer.transform(test_dataset['text'])
+
+lr_bow = LogisticRegression()
+lr_bow.fit(X_train_bow, train_dataset['label'])
+
+y_pred_bow = lr_bow.predict(X_test_bow)
+print("BoW Model Accuracy:", accuracy_score(test_dataset['label'], y_pred_bow))
+print(classification_report(test_dataset['label'], y_pred_bow))
+
+# Word Embeddings Model
+w2v_model = api.load('word2vec-google-news-300')
+
+def get_word_embeddings(text, model):
+    words = text.split()
+    word_vectors = [model[word] for word in words if word in model]
+    return np.mean(word_vectors, axis=0) if word_vectors else np.zeros(300)
+
+train_dataset['embedding'] = train_dataset['text'].apply(lambda x: get_word_embeddings(x, w2v_model))
+test_dataset['embedding'] = test_dataset['text'].apply(lambda x: get_word_embeddings(x, w2v_model))
+
+X_train_w2v = np.vstack(train_dataset['embedding'].values)
+X_test_w2v = np.vstack(test_dataset['embedding'].values)
+
+scaler = StandardScaler()
+X_train_w2v = scaler.fit_transform(X_train_w2v)
+X_test_w2v = scaler.transform(X_test_w2v)
+
+svm_w2v = SVC(kernel='linear')
+svm_w2v.fit(X_train_w2v, train_dataset['label'])
+
+y_pred_w2v = svm_w2v.predict(X_test_w2v)
+print("Word2Vec Model Accuracy:", accuracy_score(test_dataset['label'], y_pred_w2v))
+print(classification_report(test_dataset['label'], y_pred_w2v))
+
+# Transformer Model
+tokenizer = BertTokenizer.from_pretrained('bert-base-uncased')
+
+def tokenize_function(examples):
+    return tokenizer(examples['text'], padding="max_length", truncation=True)
+
+train_dataset_hf = Dataset.from_pandas(train_dataset[['text', 'label']])
+test_dataset_hf = Dataset.from_pandas(test_dataset[['text', 'label']])
+
+train_dataset_hf = train_dataset_hf.map(tokenize_function, batched=True)
+test_dataset_hf = test_dataset_hf.map(tokenize_function, batched=True)
+
+model = BertForSequenceClassification.from_pretrained('bert-base-uncased', num_labels=2)
+
+training_args = TrainingArguments(
+    output_dir='./results',
+    num_train_epochs=2,
+    warmup_steps=500,
+    per_device_train_batch_size=16,
+    per_device_eval_batch_size=64,
+    weight_decay=0.01,
+    logging_dir='./logs',
+)
+
+trainer = Trainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset_hf,
+    eval_dataset=test_dataset_hf,
+)
+
+trainer.train()
+trainer.evaluate()
